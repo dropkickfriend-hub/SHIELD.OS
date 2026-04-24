@@ -1,0 +1,19 @@
+# gh-pages is a deploy branch. Anything that isn't the built site should be ignored.
+node_modules/
+src-tauri/
+android/
+android-native/
+src/
+scripts/
+dist/
+capacitor.config.*
+package*.json
+tsconfig*.json
+vite.config.*
+server.ts
+firebase-*.json
+firestore.rules
+metadata.json
+.env*
+*.md
+!README.md
