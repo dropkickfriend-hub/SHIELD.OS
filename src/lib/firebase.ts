@@ -1,15 +1,39 @@
-import { initializeApp } from 'firebase/app';
-import { getAuth, GoogleAuthProvider, signInWithPopup } from 'firebase/auth';
-import { getFirestore, doc, getDocFromServer } from 'firebase/firestore';
-import firebaseConfig from '../../firebase-applet-config.json';
+import { initializeApp, getApp, getApps, FirebaseApp } from 'firebase/app';
+import { getAuth, GoogleAuthProvider, signInWithPopup, Auth } from 'firebase/auth';
+import { getFirestore, doc, getDocFromServer, Firestore } from 'firebase/firestore';
 
-const app = initializeApp(firebaseConfig);
-export const auth = getAuth(app);
-export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
+let app: FirebaseApp | null = null;
+let auth: Auth | null = null;
+let db: Firestore | null = null;
+
+// Use import.meta.env which is standard for Vite
+const firebaseConfigEnv = import.meta.env.VITE_FIREBASE_CONFIG;
+
+try {
+  let config = null;
+  if (firebaseConfigEnv) {
+    config = JSON.parse(firebaseConfigEnv);
+  }
+
+  if (config) {
+    app = !getApps().length ? initializeApp(config) : getApp();
+    auth = getAuth(app);
+    db = getFirestore(app, config.firestoreDatabaseId);
+    console.log("Firebase initialized successfully.");
+  }
+} catch (e) {
+  console.warn("Firebase config missing or invalid. Features disabled.");
+}
+
+export { auth, db };
 
 const provider = new GoogleAuthProvider();
 
 export const signIn = async () => {
+  if (!auth) {
+    console.error("Auth not initialized");
+    return null;
+  }
   try {
     const result = await signInWithPopup(auth, provider);
     return result.user;
@@ -20,12 +44,12 @@ export const signIn = async () => {
 };
 
 export async function testConnection() {
+  if (!db) return;
   try {
-    // Attempting a server-side get to verify rule connectivity
     await getDocFromServer(doc(db, 'test', 'connection'));
   } catch (error) {
     if(error instanceof Error && error.message.includes('the client is offline')) {
-      console.error("Please check your Firebase configuration or network.");
+      console.error("Remote connectivity issues.");
     }
   }
 }
