@@ -1,4 +1,7 @@
-import type {Capabilities, ProcessEntry, NetworkConnection, WifiScanResult, KillResult} from './types';
+import type {
+  Capabilities, ProcessEntry, NetworkConnection, WifiScanResult,
+  BleDevice, KillResult, ScanReport, ThreatIntelStats,
+} from './types';
 
 const mockProcesses: string[] = [
   'kernel_task', 'launchd', 'securityd', 'WindowServer',
@@ -13,6 +16,8 @@ export const webCapabilities: Capabilities = {
     killProcess: false,
     networkMonitor: false,
     wifiScan: false,
+    bleScan: false,
+    fileScan: false,
     blockDomain: false,
   },
   async listProcesses(): Promise<ProcessEntry[]> {
@@ -30,10 +35,13 @@ export const webCapabilities: Capabilities = {
   async killProcess(): Promise<KillResult> {
     return {ok: false, message: 'Kill unavailable in browser demo mode.'};
   },
-  async listConnections(): Promise<NetworkConnection[]> {
-    return [];
+  async listConnections(): Promise<NetworkConnection[]> { return []; },
+  async scanWifi(): Promise<WifiScanResult[]> { return []; },
+  async scanBle(): Promise<BleDevice[]> { return []; },
+  async scanFiles(): Promise<ScanReport> {
+    return {root: '', filesScanned: 0, bytesScanned: 0, durationMs: 0, findings: []};
   },
-  async scanWifi(): Promise<WifiScanResult[]> {
-    return [];
+  async refreshThreatIntel(): Promise<ThreatIntelStats> {
+    return {badIps: 0, badHashes: 0, error: 'Threat intel disabled in browser demo.'};
   },
 };

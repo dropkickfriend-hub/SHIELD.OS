@@ -39,7 +39,15 @@ import {
 } from 'firebase/firestore';
 import { cn } from './lib/utils';
 import { auth, db, signIn } from './lib/firebase';
-import { capabilities, type ProcessEntry } from './capabilities';
+import {
+  capabilities,
+  type ProcessEntry,
+  type NetworkConnection,
+  type WifiScanResult,
+  type BleDevice,
+  type ScanReport,
+  type ThreatIntelStats,
+} from './capabilities';
 
 // --- Types ---
 interface LogEntry {
@@ -167,6 +175,11 @@ const SecurityDashboard = () => {
   const [networkInfo, setNetworkInfo] = useState<any>(null);
   const [location, setLocation] = useState<any>(null);
   const [processes, setProcesses] = useState<ProcessEntry[]>([]);
+  const [connections, setConnections] = useState<NetworkConnection[]>([]);
+  const [wifi, setWifi] = useState<WifiScanResult[]>([]);
+  const [ble, setBle] = useState<BleDevice[]>([]);
+  const [scanReport, setScanReport] = useState<ScanReport | null>(null);
+  const [threatIntel, setThreatIntel] = useState<ThreatIntelStats | null>(null);
   const [user, setUser] = useState<any>(null);
   const [perfReports, setPerfReports] = useState<PerfReport[]>([]);
   const [isBenchmarking, setIsBenchmarking] = useState(false);
@@ -187,55 +200,119 @@ const SecurityDashboard = () => {
     if (scanning) return;
     setScanning(true);
     setProgress(0);
-    addLog("Initializing Deep Kernel Scan...", "info", "MALWARE");
-    
-    const duration = 8000;
-    const startTime = Date.now();
-    
-    const interval = setInterval(() => {
-      const elapsed = Date.now() - startTime;
-      const p = Math.min((elapsed / duration) * 100, 100);
-      setProgress(p);
+    setScanReport(null);
 
-      if (p > 20 && p < 21) addLog("Scanning partition /system/bin...", "info", "MALWARE");
-      if (p > 50 && p < 51) addLog("Suspicious signature detected in temp cache. Analyzing...", "warn", "MALWARE");
-      if (p > 80 && p < 81) addLog("Heuristic analysis bypass check: OK", "success", "MALWARE");
+    if (!capabilities.supports.fileScan) {
+      addLog("Initializing simulated scan (native build required for real scan)...", "info", "MALWARE");
+      const duration = 4000;
+      const startTime = Date.now();
+      const interval = setInterval(() => {
+        const elapsed = Date.now() - startTime;
+        const p = Math.min((elapsed / duration) * 100, 100);
+        setProgress(p);
+        if (p >= 100) {
+          clearInterval(interval);
+          setScanning(false);
+          addLog("Simulated scan complete. Install the desktop or Android build for real scanning.", "success", "MALWARE");
+        }
+      }, 100);
+      return;
+    }
 
-      if (p >= 100) {
-        clearInterval(interval);
-        setScanning(false);
-        addLog("Scan complete. 0 threats found. System integrity verified.", "success", "MALWARE");
+    addLog("Refreshing threat intelligence...", "info", "MALWARE");
+    try {
+      const stats = await capabilities.refreshThreatIntel();
+      setThreatIntel(stats);
+      addLog(`Intel loaded: ${stats.badIps} bad IPs, ${stats.badHashes} bad hashes`, "success", "MALWARE");
+      if (stats.error) addLog(stats.error, "warn", "MALWARE");
+    } catch (e) {
+      addLog(`Intel refresh failed: ${e}`, "warn", "MALWARE");
+    }
+
+    addLog(capabilities.platform === 'android' ? "Scanning installed APKs..." : "Scanning Downloads directory...", "info", "MALWARE");
+    // Visual progress while we wait for the (synchronous on Rust side) scan.
+    setProgress(5);
+    const tick = setInterval(() => setProgress((p) => Math.min(p + 3, 92)), 250);
+
+    try {
+      const report = await capabilities.scanFiles();
+      clearInterval(tick);
+      setProgress(100);
+      setScanReport(report);
+      const level = report.findings.length > 0 ? "error" : "success";
+      addLog(
+        `Scan complete: ${report.filesScanned} item(s), ${report.findings.length} threat(s) found in ${report.durationMs}ms.`,
+        level,
+        "MALWARE"
+      );
+      for (const f of report.findings.slice(0, 5)) {
+        addLog(`THREAT: ${f.label ?? f.path} — ${f.reason}`, "error", "MALWARE");
       }
-    }, 100);
+    } catch (e) {
+      clearInterval(tick);
+      addLog(`Scan failed: ${e}`, "error", "MALWARE");
+    } finally {
+      setScanning(false);
+    }
   };
 
   const checkNetwork = async () => {
     addLog("Initiating Network Tunneling Verification...", "info", "NET");
     try {
-      // Using a public API since GitHub Pages doesn't support the Express backend
       const response = await fetch("https://api.ipify.org?format=json");
       const data = await response.json();
-      setNetworkInfo({
-        ip: data.ip,
-        status: "SECURE",
-        tunnelingDetected: false
-      });
+      setNetworkInfo({ip: data.ip, status: "SECURE", tunnelingDetected: false});
       addLog(`Public IP Trace: ${data.ip}`, "info", "NET");
-      
+
       if ("geolocation" in navigator) {
         navigator.geolocation.getCurrentPosition((pos) => {
-          const loc = { lat: pos.coords.latitude, lng: pos.coords.longitude };
+          const loc = {lat: pos.coords.latitude, lng: pos.coords.longitude};
           setLocation(loc);
           addLog(`Device Geo-Position: ${loc.lat.toFixed(4)}, ${loc.lng.toFixed(4)}`, "info", "NET");
-          addLog("Geo-IP comparison match: VERIFIED", "success", "NET");
-        }, (err) => {
-          addLog("Geo-access denied. Fallback to IP-only analysis.", "warn", "NET");
-        });
+        }, () => addLog("Geo-access denied. Fallback to IP-only analysis.", "warn", "NET"));
       }
-    } catch (e) {
+    } catch {
       addLog("External trace failed. Connectivity limited.", "error", "NET");
     }
+
+    if (capabilities.supports.networkMonitor) {
+      try {
+        const conns = await capabilities.listConnections();
+        setConnections(conns);
+        const malicious = conns.filter((c) => c.severity === 'malicious').length;
+        if (malicious > 0) {
+          addLog(`${malicious} malicious remote(s) matched on threat intel.`, "error", "NET");
+        } else {
+          addLog(`${conns.length} active connection(s) — no threat-intel hits.`, "success", "NET");
+        }
+      } catch (e) {
+        addLog(`Connection enumeration failed: ${e}`, "warn", "NET");
+      }
+    }
   };
+
+  const rescanRf = useCallback(async () => {
+    if (!capabilities.supports.wifiScan && !capabilities.supports.bleScan) {
+      addLog("RF scan requires the Android build.", "warn", "RF");
+      return;
+    }
+    addLog("Initiating spectral sweep...", "info", "RF");
+    try {
+      if (capabilities.supports.wifiScan) {
+        const w = await capabilities.scanWifi();
+        setWifi(w);
+        const suspicious = w.filter((r) => r.suspicious).length;
+        addLog(`Wi-Fi: ${w.length} AP(s) detected, ${suspicious} flagged.`, suspicious ? "warn" : "success", "RF");
+      }
+      if (capabilities.supports.bleScan) {
+        const b = await capabilities.scanBle();
+        setBle(b);
+        addLog(`BLE: ${b.length} device(s) advertising.`, "info", "RF");
+      }
+    } catch (e) {
+      addLog(`RF scan failed: ${e}`, "error", "RF");
+    }
+  }, [addLog]);
 
   // --- Process / Installed-App listing (real on native, simulated on web) ---
   useEffect(() => {
@@ -249,11 +326,49 @@ const SecurityDashboard = () => {
       }
     };
     refresh();
-    // Desktop refreshes live; Android installed-app list is static, so poll slower.
     const intervalMs = capabilities.platform === 'android' ? 30_000 : 2_000;
     const interval = setInterval(refresh, intervalMs);
     return () => { cancelled = true; clearInterval(interval); };
   }, [addLog]);
+
+  // --- Live connection polling (desktop/android only) ---
+  useEffect(() => {
+    if (!capabilities.supports.networkMonitor) return;
+    let cancelled = false;
+    const refresh = async () => {
+      try {
+        const conns = await capabilities.listConnections();
+        if (!cancelled) setConnections(conns);
+      } catch { /* silent */ }
+    };
+    refresh();
+    const interval = setInterval(refresh, 5_000);
+    return () => { cancelled = true; clearInterval(interval); };
+  }, []);
+
+  // --- Threat intel refresh on mount ---
+  useEffect(() => {
+    (async () => {
+      try {
+        const stats = await capabilities.refreshThreatIntel();
+        setThreatIntel(stats);
+        if (stats.badIps || stats.badHashes) {
+          addLog(`Threat intel loaded: ${stats.badIps} IPs, ${stats.badHashes} hashes.`, "success", "INTEL");
+        } else if (stats.error) {
+          addLog(stats.error, "warn", "INTEL");
+        }
+      } catch (e) {
+        addLog(`Threat intel init failed: ${e}`, "warn", "INTEL");
+      }
+    })();
+  }, [addLog]);
+
+  // --- RF auto-scan when the tab opens ---
+  useEffect(() => {
+    if (activeTab === 'rf' && capabilities.supports.wifiScan && wifi.length === 0) {
+      rescanRf();
+    }
+  }, [activeTab, rescanRf, wifi.length]);
 
   const handleKill = useCallback(async (id: string, label: string) => {
     if (!capabilities.supports.killProcess) {
@@ -462,25 +577,55 @@ const SecurityDashboard = () => {
 
                   <div className="grid grid-cols-2 gap-6">
                     <div className="bg-[#111] border border-[#00ff41] p-6 h-40 flex flex-col justify-between">
-                      <span className="text-[10px] uppercase tracking-[0.3em] opacity-60 font-black">Threat Library</span>
+                      <span className="text-[10px] uppercase tracking-[0.3em] opacity-60 font-black">Threat Intel</span>
                       <div className="space-y-2">
                         <div className="flex justify-between items-center text-xs">
-                          <span className="opacity-80">SIGNATURE_DB</span>
-                          <span className="font-black">v8.42.1</span>
+                          <span className="opacity-80">BAD_IPS</span>
+                          <span className="font-black">{threatIntel ? threatIntel.badIps.toLocaleString() : '—'}</span>
                         </div>
                         <div className="flex justify-between items-center text-xs">
-                          <span className="opacity-80">HEURISTIC_ENGINE</span>
-                          <span className="font-black">ACTIVE</span>
+                          <span className="opacity-80">BAD_HASHES</span>
+                          <span className="font-black">{threatIntel ? threatIntel.badHashes.toLocaleString() : '—'}</span>
+                        </div>
+                        <div className="flex justify-between items-center text-[10px] opacity-60">
+                          <span>SOURCE</span>
+                          <span className="font-bold">FireHOL + MalwareBazaar</span>
                         </div>
                       </div>
                     </div>
                     <div className="bg-[#111] border border-[#00ff41] p-6 h-40 flex flex-col justify-between">
-                      <span className="text-[10px] uppercase tracking-[0.3em] opacity-60 font-black">Kernel Status</span>
-                      <div className="flex items-end gap-3 leading-none">
-                        <span className="text-5xl font-black tracking-tighter italic uppercase">Hardened</span>
-                      </div>
+                      <span className="text-[10px] uppercase tracking-[0.3em] opacity-60 font-black">Last Scan</span>
+                      {scanReport ? (
+                        <div className="space-y-1 text-xs">
+                          <div className="flex justify-between"><span className="opacity-60">ROOT</span><span className="truncate max-w-[180px]">{scanReport.root}</span></div>
+                          <div className="flex justify-between"><span className="opacity-60">FILES</span><span className="font-black">{scanReport.filesScanned}</span></div>
+                          <div className="flex justify-between"><span className="opacity-60">THREATS</span><span className={cn("font-black", scanReport.findings.length > 0 && "text-[#ff4100]")}>{scanReport.findings.length}</span></div>
+                        </div>
+                      ) : (
+                        <div className="flex items-end gap-3 leading-none">
+                          <span className="text-5xl font-black tracking-tighter italic uppercase">{capabilities.supports.fileScan ? 'Ready' : 'Sim'}</span>
+                        </div>
+                      )}
                     </div>
                   </div>
+
+                  {scanReport && scanReport.findings.length > 0 && (
+                    <div className="bg-[#111] border-2 border-[#ff4100] p-6">
+                      <div className="flex items-center gap-3 mb-4 border-b border-[#ff4100] pb-2">
+                        <AlertTriangle size={16} strokeWidth={3} className="text-[#ff4100]" />
+                        <h3 className="text-[#ff4100] text-sm font-black uppercase tracking-[0.3em]">Findings</h3>
+                      </div>
+                      <div className="space-y-2">
+                        {scanReport.findings.map((f) => (
+                          <div key={f.sha256} className="grid grid-cols-12 gap-2 text-[10px] font-black items-center p-2 bg-black/40">
+                            <div className="col-span-6 truncate" title={f.path}>{f.label ?? f.path}</div>
+                            <div className="col-span-4 truncate font-mono text-[9px] opacity-60" title={f.sha256}>{f.sha256.slice(0, 16)}…</div>
+                            <div className="col-span-2 text-right text-[#ff4100]">{f.reason.split(' ')[0]}</div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                 </motion.div>
               )}
 
@@ -621,24 +766,63 @@ const SecurityDashboard = () => {
                       </div>
                     </div>
 
-                    <div className="h-24 bg-[#0a0a0a] border border-[#00ff41] flex items-center justify-center relative overflow-hidden">
-                      <div className="grid grid-cols-10 gap-1 w-full px-4">
-                         {Array.from({ length: 10 }).map((_, i) => (
-                           <div key={i} className={cn("h-8 border border-[#00ff41]", i < 7 ? "bg-[#00ff41]" : "opacity-20")} />
-                         ))}
+                    <div className="mb-4 flex justify-between text-[9px] uppercase tracking-widest font-black">
+                      <span className="opacity-60">
+                        Source: <span className="text-[#00ff41]">{capabilities.platform}</span>
+                        {!capabilities.supports.networkMonitor && " (simulated)"}
+                      </span>
+                      <span className="opacity-60">{connections.length} socket(s)</span>
+                    </div>
+
+                    <div className="space-y-1">
+                      <div className="grid grid-cols-12 gap-2 text-[8px] uppercase font-black text-[#00ff41]/40 tracking-widest mb-2 border-b border-[#00ff41]/10 pb-2">
+                        <div className="col-span-4">REMOTE</div>
+                        <div className="col-span-3">PROCESS</div>
+                        <div className="col-span-2 text-center">PROTO</div>
+                        <div className="col-span-2 text-center">STATE</div>
+                        <div className="col-span-1 text-right">SEV</div>
+                      </div>
+                      {connections.length === 0 ? (
+                        <div className="text-[10px] opacity-40 py-6 text-center uppercase tracking-widest italic">
+                          {capabilities.supports.networkMonitor ? 'No active connections.' : 'Install the desktop/Android build for real sockets.'}
+                        </div>
+                      ) : connections.slice(0, 60).map((c, i) => (
+                        <div
+                          key={`${c.remoteAddr}-${c.localAddr}-${i}`}
+                          className={cn(
+                            "grid grid-cols-12 gap-2 p-2 text-[10px] items-center border border-transparent",
+                            c.severity === 'malicious' && "bg-[#ff4100]/10 border-[#ff4100]/50",
+                            c.severity === 'suspicious' && "bg-amber-500/10 border-amber-500/40"
+                          )}
+                          title={c.reason ?? ''}
+                        >
+                          <div className="col-span-4 font-mono truncate">{c.remoteAddr}</div>
+                          <div className="col-span-3 truncate opacity-80">{c.processName ?? (c.pid ? `pid ${c.pid}` : '—')}</div>
+                          <div className="col-span-2 text-center opacity-60">{c.protocol}</div>
+                          <div className="col-span-2 text-center opacity-60">{c.state}</div>
+                          <div className={cn(
+                            "col-span-1 text-right font-black text-[9px] uppercase",
+                            c.severity === 'malicious' && "text-[#ff4100]",
+                            c.severity === 'suspicious' && "text-amber-500",
+                            c.severity === 'safe' && "text-[#00ff41]/60",
+                          )}>{c.severity.slice(0, 3)}</div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  {connections.filter((c) => c.severity === 'malicious').length > 0 && (
+                    <div className="p-6 bg-[#ff4100] text-black border-2 border-black flex gap-4">
+                      <AlertTriangle className="shrink-0" size={24} strokeWidth={3} />
+                      <div className="flex flex-col justify-center">
+                        <h4 className="text-xs font-black uppercase tracking-widest mb-1">Defense Advisory</h4>
+                        <p className="text-[10px] leading-tight font-black uppercase">
+                          {connections.filter((c) => c.severity === 'malicious').length} connection(s) match known-bad IPs.
+                          Kill the owning process on the Task Manager tab, or add a firewall rule for the remote address.
+                        </p>
                       </div>
                     </div>
-                  </div>
-                  
-                  <div className="p-6 bg-[#ff4100] text-black border-2 border-black flex gap-4">
-                    <AlertTriangle className="shrink-0" size={24} strokeWidth={3} />
-                    <div className="flex flex-col justify-center">
-                      <h4 className="text-xs font-black uppercase tracking-widest mb-1">Defense Advisory</h4>
-                      <p className="text-[10px] leading-tight font-black uppercase">
-                        Detected encrypted data packet burst from unknown routing node. Verification required to ensure transmission integrity.
-                      </p>
-                    </div>
-                  </div>
+                  )}
                 </motion.div>
               )}
 
@@ -714,7 +898,7 @@ const SecurityDashboard = () => {
               )}
 
               {activeTab === 'rf' && (
-                <motion.div 
+                <motion.div
                   key="rf"
                   initial={{ opacity: 0 }}
                   animate={{ opacity: 1 }}
@@ -722,45 +906,89 @@ const SecurityDashboard = () => {
                   className="space-y-8"
                 >
                   <div className="bg-[#111] border border-[#00ff41] p-8">
-                    <div className="mb-12">
-                      <h2 className="text-3xl font-black tracking-tighter uppercase leading-none mb-1">Spectral Audit</h2>
-                      <p className="text-[#00ff41]/60 text-[10px] uppercase tracking-widest">Monitoring Radio Frequency emissions and unauthorized transmitters.</p>
+                    <div className="flex items-start justify-between mb-8">
+                      <div>
+                        <h2 className="text-3xl font-black tracking-tighter uppercase leading-none mb-1">Spectral Audit</h2>
+                        <p className="text-[#00ff41]/60 text-[10px] uppercase tracking-widest">
+                          {capabilities.supports.wifiScan
+                            ? `Wi-Fi + BLE scan on ${capabilities.platform}.`
+                            : 'RF scan requires the Android build.'}
+                        </p>
+                      </div>
+                      <button onClick={rescanRf} className="p-4 border border-[#00ff41] text-[#00ff41] hover:bg-[#00ff41] hover:text-black transition-colors">
+                        <RefreshCw size={18} />
+                      </button>
                     </div>
 
-                    <div className="grid grid-cols-8 gap-2 h-40 mb-12 border-b border-[#00ff41] pb-6">
-                      {Array.from({ length: 32 }).map((_, i) => (
-                        <div key={i} className="bg-[#00ff41]/5 flex flex-col justify-end">
-                          <motion.div 
-                            animate={{ height: `${Math.random() * 80 + 10}%` }}
-                            transition={{ duration: 0.3, repeat: Infinity, repeatType: "mirror" }}
-                            className="w-full bg-[#00ff41] opacity-60"
-                          />
+                    <div className="grid gap-4 mb-8" style={{gridTemplateColumns: `repeat(${Math.max(8, Math.min(wifi.length || 8, 16))}, minmax(0, 1fr))`}}>
+                      {(wifi.length > 0 ? wifi : Array.from({length: 8}).map(() => null)).map((w, i) => {
+                        if (!w) {
+                          return (
+                            <div key={`placeholder-${i}`} className="bg-[#00ff41]/5 h-32 flex flex-col justify-end">
+                              <motion.div
+                                animate={{height: `${Math.random() * 60 + 10}%`}}
+                                transition={{duration: 0.4, repeat: Infinity, repeatType: 'mirror'}}
+                                className="w-full bg-[#00ff41]/30"
+                              />
+                            </div>
+                          );
+                        }
+                        // RSSI -100..-20 → 0..100
+                        const pct = Math.max(0, Math.min(100, ((w.rssi + 100) * 100) / 80));
+                        return (
+                          <div
+                            key={`${w.bssid}-${i}`}
+                            className="flex flex-col justify-end h-32 bg-[#00ff41]/5 relative group"
+                            title={`${w.ssid} ${w.rssi}dBm ${w.encryption}`}
+                          >
+                            <div
+                              className={cn('w-full', w.suspicious ? 'bg-[#ff4100]' : 'bg-[#00ff41]')}
+                              style={{height: `${pct}%`}}
+                            />
+                            <div className="absolute bottom-0 left-1/2 -translate-x-1/2 text-[7px] opacity-0 group-hover:opacity-100 bg-black px-1 font-black">
+                              {w.rssi}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+
+                    <div className="space-y-2">
+                      <h3 className="text-[10px] uppercase tracking-[0.3em] font-black opacity-60 mb-2">Wi-Fi Access Points</h3>
+                      {wifi.length === 0 ? (
+                        <div className="text-[10px] opacity-40 py-4 text-center uppercase tracking-widest italic">
+                          {capabilities.supports.wifiScan ? 'Tap refresh to scan.' : 'Available on Android.'}
+                        </div>
+                      ) : wifi.map((w) => (
+                        <div
+                          key={w.bssid}
+                          className={cn(
+                            'grid grid-cols-12 gap-2 text-[10px] p-2 items-center border',
+                            w.suspicious ? 'border-[#ff4100]/50 bg-[#ff4100]/5' : 'border-[#00ff41]/20'
+                          )}
+                          title={w.reason ?? ''}
+                        >
+                          <div className="col-span-4 font-black truncate">{w.ssid}</div>
+                          <div className="col-span-3 font-mono opacity-60 truncate">{w.bssid}</div>
+                          <div className="col-span-2 text-center">{w.encryption}</div>
+                          <div className="col-span-1 text-center opacity-60">{w.channel ?? '—'}</div>
+                          <div className={cn('col-span-2 text-right font-black', w.suspicious && 'text-[#ff4100]')}>{w.rssi} dBm</div>
                         </div>
                       ))}
                     </div>
 
-                    <div className="space-y-4">
-                      <div className="flex items-center justify-between p-4 bg-[#111] border border-[#00ff41]">
-                        <div className="flex items-center gap-4">
-                          <Radio size={20} className="text-[#00ff41]" strokeWidth={3} />
-                          <div>
-                            <div className="text-xs font-black uppercase">ISM Band Scan</div>
-                            <div className="text-[9px] text-[#00ff41]/50 uppercase tracking-[0.2em] font-bold">2.4GHz / 5.8GHz</div>
+                    {ble.length > 0 && (
+                      <div className="space-y-2 mt-8">
+                        <h3 className="text-[10px] uppercase tracking-[0.3em] font-black opacity-60 mb-2">BLE Advertisers</h3>
+                        {ble.slice(0, 30).map((d) => (
+                          <div key={d.address} className="grid grid-cols-12 gap-2 text-[10px] p-2 items-center border border-[#00ff41]/20">
+                            <div className="col-span-5 font-black truncate">{d.name ?? '(unnamed)'}</div>
+                            <div className="col-span-4 font-mono opacity-60 truncate">{d.address}</div>
+                            <div className="col-span-3 text-right font-black">{d.rssi} dBm</div>
                           </div>
-                        </div>
-                        <span className="text-[10px] uppercase font-black px-2 py-1 bg-[#00ff41]/20">Status: Clear</span>
+                        ))}
                       </div>
-                      <div className="flex items-center justify-between p-4 bg-[#0a0a0a] border border-[#ff4100]">
-                        <div className="flex items-center gap-4">
-                          <Zap size={20} className="text-[#ff4100]" strokeWidth={3} />
-                          <div>
-                            <div className="text-xs font-black text-[#ff4100] uppercase">Unidentified Peak</div>
-                            <div className="text-[9px] text-[#ff4100]/50 uppercase tracking-[0.2em] font-bold">Near Field Offset</div>
-                          </div>
-                        </div>
-                        <span className="text-[10px] uppercase font-black px-2 py-1 bg-[#ff4100] text-black">Flagged</span>
-                      </div>
-                    </div>
+                    )}
                   </div>
                 </motion.div>
               )}

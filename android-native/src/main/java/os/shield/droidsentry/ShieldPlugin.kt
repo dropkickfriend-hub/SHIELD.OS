@@ -1,14 +1,18 @@
 package os.shield.droidsentry
 
+import android.bluetooth.BluetoothManager
+import android.bluetooth.le.ScanCallback
+import android.bluetooth.le.ScanResult as BleScanResult
+import android.content.Context
 import android.content.Intent
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageInfo
 import android.content.pm.PackageManager
-import android.content.pm.PermissionInfo
 import android.net.Uri
 import android.net.wifi.ScanResult
 import android.net.wifi.WifiManager
 import android.os.Build
+import android.os.Environment
 import com.getcapacitor.JSArray
 import com.getcapacitor.JSObject
 import com.getcapacitor.Plugin
@@ -18,6 +22,8 @@ import com.getcapacitor.annotation.CapacitorPlugin
 import com.getcapacitor.annotation.Permission
 import com.getcapacitor.annotation.PermissionCallback
 import java.io.File
+import java.io.FileInputStream
+import java.security.MessageDigest
 
 private val DANGEROUS_PERMISSIONS = setOf(
     "android.permission.READ_SMS",
@@ -50,6 +56,11 @@ private val STALKERWARE_INDICATORS = listOf(
             "android.permission.ACCESS_WIFI_STATE",
             "android.permission.CHANGE_WIFI_STATE",
             "android.permission.NEARBY_WIFI_DEVICES",
+        ]),
+        Permission(alias = "ble", strings = [
+            "android.permission.BLUETOOTH_SCAN",
+            "android.permission.BLUETOOTH_CONNECT",
+            "android.permission.ACCESS_FINE_LOCATION",
         ]),
     ]
 )
@@ -221,5 +232,145 @@ class ShieldPlugin : Plugin() {
         "0A" -> "LISTEN"
         "0B" -> "CLOSING"
         else -> "UNKNOWN"
+    }
+
+    // ---- BLE scan -----------------------------------------------------------
+
+    private val bleResults = mutableMapOf<String, BleScanResult>()
+    private var bleCallback: ScanCallback? = null
+
+    @PluginMethod
+    fun scanBle(call: PluginCall) {
+        if (getPermissionState("ble") != com.getcapacitor.PermissionState.GRANTED) {
+            requestPermissionForAlias("ble", call, "blePermissionCallback")
+            return
+        }
+        performBleScan(call)
+    }
+
+    @PermissionCallback
+    private fun blePermissionCallback(call: PluginCall) {
+        if (getPermissionState("ble") == com.getcapacitor.PermissionState.GRANTED) {
+            performBleScan(call)
+        } else {
+            call.reject("Bluetooth permission required for BLE scan.")
+        }
+    }
+
+    private fun performBleScan(call: PluginCall) {
+        val bm = context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager
+        val scanner = bm?.adapter?.bluetoothLeScanner
+        if (scanner == null) {
+            call.reject("Bluetooth LE scanner unavailable.")
+            return
+        }
+        bleResults.clear()
+        try {
+            bleCallback?.let { scanner.stopScan(it) }
+        } catch (_: SecurityException) {}
+        val cb = object : ScanCallback() {
+            override fun onScanResult(callbackType: Int, result: BleScanResult) {
+                bleResults[result.device.address] = result
+            }
+            override fun onBatchScanResults(results: MutableList<BleScanResult>) {
+                for (r in results) bleResults[r.device.address] = r
+            }
+        }
+        bleCallback = cb
+        try {
+            scanner.startScan(cb)
+        } catch (e: SecurityException) {
+            call.reject("Bluetooth permission denied: ${e.message}")
+            return
+        }
+
+        // Collect for ~4s then return snapshot.
+        android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+            try { scanner.stopScan(cb) } catch (_: SecurityException) {}
+            val arr = JSArray()
+            for (r in bleResults.values) {
+                val obj = JSObject()
+                val rec = r.scanRecord
+                obj.put("address", r.device.address)
+                obj.put("name", try { r.device.name } catch (_: SecurityException) { null } ?: rec?.deviceName ?: "")
+                obj.put("rssi", r.rssi)
+                obj.put("txPower", if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) r.txPower else 0)
+                obj.put("connectable", if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) r.isConnectable else true)
+                arr.put(obj)
+            }
+            val ret = JSObject()
+            ret.put("devices", arr)
+            call.resolve(ret)
+        }, 4000)
+    }
+
+    // ---- APK hash scan ------------------------------------------------------
+
+    @PluginMethod
+    fun scanApkHashes(call: PluginCall) {
+        val knownBad = call.getArray("knownBadHashes")
+        val badSet = HashSet<String>()
+        if (knownBad != null) {
+            for (i in 0 until knownBad.length()) {
+                badSet.add(knownBad.getString(i).lowercase())
+            }
+        }
+        val pm = context.packageManager
+        val installed = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            pm.getInstalledPackages(PackageManager.PackageInfoFlags.of(0L))
+        } else {
+            @Suppress("DEPRECATION")
+            pm.getInstalledPackages(0)
+        }
+
+        val findings = JSArray()
+        var scanned = 0
+        for (p in installed) {
+            val ai = p.applicationInfo ?: continue
+            val apkPath = ai.sourceDir ?: continue
+            val f = File(apkPath)
+            if (!f.exists() || f.length() > 512L * 1024 * 1024) continue
+            val hash = try { sha256(f) } catch (_: Throwable) { continue }
+            scanned++
+            if (hash in badSet) {
+                val obj = JSObject()
+                obj.put("packageName", p.packageName)
+                obj.put("label", ai.loadLabel(pm).toString())
+                obj.put("path", apkPath)
+                obj.put("sha256", hash)
+                obj.put("sizeBytes", f.length())
+                obj.put("reason", "MalwareBazaar SHA-256 match")
+                findings.put(obj)
+            }
+        }
+        val ret = JSObject()
+        ret.put("scanned", scanned)
+        ret.put("findings", findings)
+        call.resolve(ret)
+    }
+
+    private fun sha256(f: File): String {
+        val md = MessageDigest.getInstance("SHA-256")
+        FileInputStream(f).use { fis ->
+            val buf = ByteArray(64 * 1024)
+            while (true) {
+                val n = fis.read(buf)
+                if (n <= 0) break
+                md.update(buf, 0, n)
+            }
+        }
+        return md.digest().joinToString("") { "%02x".format(it) }
+    }
+
+    // ---- Threat-intel helper ------------------------------------------------
+
+    @PluginMethod
+    fun fetchThreatIntel(call: PluginCall) {
+        // Kotlin side just piggybacks on the JS fetch — this is a hook to keep
+        // parity with desktop. Returns empty for now; web/app does the HTTP.
+        val ret = JSObject()
+        ret.put("bad_ips", 0)
+        ret.put("bad_hashes", 0)
+        call.resolve(ret)
     }
 }

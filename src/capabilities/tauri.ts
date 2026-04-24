@@ -1,5 +1,8 @@
 import {invoke} from '@tauri-apps/api/core';
-import type {Capabilities, ProcessEntry, NetworkConnection, WifiScanResult, KillResult} from './types';
+import type {
+  Capabilities, ProcessEntry, NetworkConnection, WifiScanResult,
+  BleDevice, KillResult, ScanReport, ThreatIntelStats, Severity,
+} from './types';
 
 interface RawProcess {
   pid: number;
@@ -11,6 +14,25 @@ interface RawProcess {
   cmd: string;
   flagged: boolean;
   flag_reason?: string;
+}
+
+interface RawConnection {
+  local_addr: string;
+  remote_addr: string;
+  state: string;
+  protocol: string;
+  pid?: number;
+  process_name?: string;
+  severity: Severity;
+  reason?: string;
+}
+
+interface RawScanReport {
+  root: string;
+  files_scanned: number;
+  bytes_scanned: number;
+  duration_ms: number;
+  threats: Array<{path: string; sha256: string; size: number; reason: string}>;
 }
 
 const normalizeStatus = (s: string): ProcessEntry['status'] => {
@@ -26,6 +48,8 @@ export const tauriCapabilities: Capabilities = {
     killProcess: true,
     networkMonitor: true,
     wifiScan: false,
+    bleScan: false,
+    fileScan: true,
     blockDomain: false,
   },
   async listProcesses(): Promise<ProcessEntry[]> {
@@ -51,13 +75,37 @@ export const tauriCapabilities: Capabilities = {
     }
   },
   async listConnections(): Promise<NetworkConnection[]> {
-    try {
-      return await invoke<NetworkConnection[]>('list_connections');
-    } catch {
-      return [];
-    }
+    const raw = await invoke<RawConnection[]>('list_connections');
+    return raw.map((c) => ({
+      localAddr: c.local_addr,
+      remoteAddr: c.remote_addr,
+      state: c.state,
+      protocol: c.protocol,
+      pid: c.pid,
+      processName: c.process_name,
+      severity: c.severity,
+      reason: c.reason,
+    }));
   },
-  async scanWifi(): Promise<WifiScanResult[]> {
-    return [];
+  async scanWifi(): Promise<WifiScanResult[]> { return []; },
+  async scanBle(): Promise<BleDevice[]> { return []; },
+  async scanFiles(path?: string): Promise<ScanReport> {
+    const raw = await invoke<RawScanReport>('scan_path', {path: path ?? null});
+    return {
+      root: raw.root,
+      filesScanned: raw.files_scanned,
+      bytesScanned: raw.bytes_scanned,
+      durationMs: raw.duration_ms,
+      findings: raw.threats.map((t) => ({
+        path: t.path,
+        sha256: t.sha256,
+        size: t.size,
+        reason: t.reason,
+      })),
+    };
+  },
+  async refreshThreatIntel(): Promise<ThreatIntelStats> {
+    const r = await invoke<{bad_ips: number; bad_hashes: number; error?: string}>('refresh_threat_intel');
+    return {badIps: r.bad_ips, badHashes: r.bad_hashes, error: r.error};
   },
 };

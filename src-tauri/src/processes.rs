@@ -14,15 +14,6 @@ pub struct ProcessInfo {
     pub flag_reason: Option<String>,
 }
 
-#[derive(Serialize)]
-pub struct ConnectionInfo {
-    pub local_addr: String,
-    pub remote_addr: String,
-    pub state: String,
-    pub pid: Option<u32>,
-    pub process_name: Option<String>,
-}
-
 fn status_label(s: ProcessStatus) -> &'static str {
     match s {
         ProcessStatus::Run => "running",
@@ -104,10 +95,3 @@ pub async fn kill_process(pid: u32) -> Result<String, String> {
     }
 }
 
-#[tauri::command]
-pub async fn list_connections() -> Result<Vec<ConnectionInfo>, String> {
-    // Placeholder: real socket enumeration needs netstat bindings or the
-    // `netstat2` crate; will be filled in a follow-up once the Rust toolchain
-    // is validated end-to-end on Windows.
-    Ok(Vec::new())
-}
