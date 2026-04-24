@@ -302,25 +302,29 @@ const SecurityDashboard = () => {
   const runBenchmark = async () => {
     setIsBenchmarking(true);
     addLog("Starting hardware speed calculation...", "info", "PERF");
-    
-    // Simulate intensive computation
+
+    // Yield so the "EXECUTING..." state renders before the blocking loop.
+    await new Promise((r) => setTimeout(r, 16));
+
+    const iterations = 50_000_000;
     const start = performance.now();
     let count = 0;
-    for (let i = 0; i < 50000000; i++) {
-       count += Math.sqrt(i);
+    for (let i = 1; i < iterations; i++) {
+      count += Math.sqrt(i) / i;
     }
     const end = performance.now();
-    const duration = end - start;
-    
-    // Virtual calculation
-    const baseMHz = 3200; 
-    const actualSpeed = Math.floor( (5000 / duration) * 1000 ); 
+    // Expose `count` so V8 can't dead-code-eliminate the loop.
+    (window as unknown as {__benchSink?: number}).__benchSink = count;
+
+    const duration = Math.max(end - start, 1);
+    const baseMHz = 3200;
+    const actualSpeed = Math.min(Math.floor((5000 / duration) * 1000), 99_999);
     const hardwareSpeed = baseMHz;
     const efficiency = Math.min((actualSpeed / hardwareSpeed) * 100, 100);
-    
+
     setBenchResult(actualSpeed);
     setIsBenchmarking(false);
-    
+
     addLog(`Measured Speed: ${actualSpeed} MHz (Efficiency: ${efficiency.toFixed(1)}%)`, efficiency < 60 ? "warn" : "success", "PERF");
 
     if (!db || !user) {
