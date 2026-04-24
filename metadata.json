@@ -1,0 +1,6 @@
+{
+  "name": "DroidSentry: Advanced Security Interface",
+  "description": "High-fidelity cybersecurity dashboard simulating malware scanning, RF detection, and real-time network tunneling verification.",
+  "requestFramePermissions": ["geolocation"],
+  "majorCapabilities": ["AI Security Analysis", "Real-time Network Monitoring"]
+}

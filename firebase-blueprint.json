@@ -1,0 +1,24 @@
+{
+  "entities": {
+    "DevicePerformance": {
+      "title": "Device Performance Report",
+      "description": "Logged performance metrics for a specific device model.",
+      "type": "object",
+      "properties": {
+        "model": { "type": "string", "description": "Device model name" },
+        "hardwareSpeed": { "type": "number", "description": "Manufacturer rated speed in MHz" },
+        "actualSpeed": { "type": "number", "description": "Measured real-world speed in MHz" },
+        "efficiency": { "type": "number", "description": "Percentage of rated speed achieved" },
+        "timestamp": { "type": "string", "format": "date-time", "description": "When the benchmark was run" },
+        "userId": { "type": "string", "description": "UID of the reporter" }
+      },
+      "required": ["model", "hardwareSpeed", "actualSpeed", "efficiency", "timestamp", "userId"]
+    }
+  },
+  "firestore": {
+    "/perf_reports/{reportId}": {
+      "schema": "DevicePerformance",
+      "description": "Public database of device performance metrics"
+    }
+  }
+}

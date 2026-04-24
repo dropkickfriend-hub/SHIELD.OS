@@ -1,0 +1,38 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isValidId(id) {
+       return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    // Validation for Performance Reports
+    function isValidPerformanceReport(data) {
+      return data.keys().hasAll(['model', 'hardwareSpeed', 'actualSpeed', 'efficiency', 'timestamp', 'userId'])
+        && data.keys().size() == 6
+        && data.model is string && data.model.size() <= 100
+        && data.hardwareSpeed is number && data.hardwareSpeed > 0
+        && data.actualSpeed is number && data.actualSpeed > 0
+        && data.efficiency is number && data.efficiency >= 0
+        && data.timestamp == request.time
+        && data.userId == request.auth.uid;
+    }
+
+    match /perf_reports/{reportId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn() && isValidId(reportId) && isValidPerformanceReport(incoming());
+      // No updates or deletes for public audit trail integrity
+    }
+  }
+}
