@@ -21,7 +21,6 @@ import {
   RefreshCw,
   Eye,
   Settings,
-  Brain,
   List,
   BarChart3,
   Globe,
@@ -29,7 +28,6 @@ import {
   User
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
-import { GoogleGenAI } from "@google/genai";
 import { 
   collection, 
   addDoc, 
@@ -170,13 +168,12 @@ const Scanner = ({ active, progress }: { active: boolean, progress: number }) =>
 };
 
 const SecurityDashboard = () => {
-  const [activeTab, setActiveTab] = useState<'malware' | 'rf' | 'network' | 'ai' | 'processes' | 'perf'>('malware');
+  const [activeTab, setActiveTab] = useState<'malware' | 'rf' | 'network' | 'processes' | 'perf'>('malware');
   const [scanning, setScanning] = useState(false);
   const [progress, setProgress] = useState(0);
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [networkInfo, setNetworkInfo] = useState<any>(null);
   const [location, setLocation] = useState<any>(null);
-  const [aiAnalysis, setAiAnalysis] = useState<string>("");
   const [processes, setProcesses] = useState<ProcessInfo[]>([]);
   const [user, setUser] = useState<any>(null);
   const [perfReports, setPerfReports] = useState<PerfReport[]>([]);
@@ -245,28 +242,6 @@ const SecurityDashboard = () => {
       }
     } catch (e) {
       addLog("External trace failed. Connectivity limited.", "error", "NET");
-    }
-  };
-
-  const analyzeWithAI = async () => {
-    if (!process.env.GEMINI_API_KEY) {
-      addLog("AI Core offline: API Key missing.", "error", "AI");
-      return;
-    }
-    
-    addLog("Engaging Gemini AI Security Analysis...", "info", "AI");
-    const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-    
-    try {
-      const logDump = logs.map(l => `[${l.level}] ${l.message}`).join("\n");
-      const result = await ai.models.generateContent({
-        model: "gemini-3-flash-preview",
-        contents: `You are a cybersecurity expert. Analyze the following system logs and provide a brief technical assessment. Keep it formal and concise (max 3 sentences).\n\nLOGS:\n${logDump}`
-      });
-      setAiAnalysis(result.text || "No insights generated.");
-      addLog("AI Analysis complete. Neural feedback received.", "success", "AI");
-    } catch (e) {
-      addLog("AI Synthesis error. Try again.", "error", "AI");
     }
   };
 
@@ -397,9 +372,6 @@ const SecurityDashboard = () => {
         </button>
         <button onClick={() => setActiveTab('perf')} className={cn("p-3 transition-all", activeTab === 'perf' ? "bg-[#00ff41] text-black font-black" : "text-[#00ff41]/30 hover:text-[#00ff41]/60")} title="Hardware">
           <BarChart3 size={22} strokeWidth={3} />
-        </button>
-        <button onClick={() => setActiveTab('ai')} className={cn("p-3 transition-all", activeTab === 'ai' ? "bg-[#00ff41] text-black font-black" : "text-[#00ff41]/30 hover:text-[#00ff41]/60")} title="Neural AI">
-          <Brain size={22} strokeWidth={3} />
         </button>
         
         <div className="mt-auto p-3 text-[#00ff41]/10">
@@ -757,49 +729,6 @@ const SecurityDashboard = () => {
                       </div>
                     </div>
                   </div>
-                </motion.div>
-              )}
-
-              {activeTab === 'ai' && (
-                <motion.div 
-                  key="ai"
-                  initial={{ opacity: 0 }}
-                  animate={{ opacity: 1 }}
-                  exit={{ opacity: 0 }}
-                  className="space-y-6"
-                >
-                  <div className="bg-[#111] border border-[#00ff41] p-12 flex flex-col items-center text-center">
-                    <div className="w-32 h-32 bg-[#00ff41]/10 flex items-center justify-center mb-8 relative border-2 border-[#00ff41]">
-                      <Brain size={64} className="text-[#00ff41]" strokeWidth={3} />
-                      <motion.div 
-                        animate={{ opacity: [1, 0, 1] }}
-                        transition={{ duration: 1, repeat: Infinity }}
-                        className="absolute inset-2 border border-[#00ff41]/50"
-                      />
-                    </div>
-                    
-                    <h2 className="text-4xl font-black tracking-tighter uppercase mb-2 italic leading-none">Neural Core v3</h2>
-                    <p className="text-[#00ff41]/60 text-[10px] uppercase tracking-widest mb-8 max-w-sm">Heuristic pattern synthesis and transmission pattern recognition.</p>
-                    
-                    <button 
-                      onClick={analyzeWithAI}
-                      className="w-full max-w-xs py-5 bg-[#00ff41] text-black font-black uppercase tracking-[0.3em] text-[12px] hover:bg-white transition-all flex items-center justify-center gap-3"
-                    >
-                      <Zap size={14} fill="currentColor" />
-                      Engage Neural Array
-                    </button>
-                  </div>
-
-                  {aiAnalysis && (
-                    <div className="bg-black border-2 border-[#00ff41] p-8 relative overflow-hidden">
-                      <div className="absolute top-0 left-0 p-2 text-[8px] bg-[#00ff41] text-black font-black uppercase tracking-widest">AI_OUTPUT_STREAM</div>
-                      <div className="mt-4">
-                        <p className="text-sm leading-relaxed text-[#00ff41] font-mono italic font-bold">
-                          {aiAnalysis}
-                        </p>
-                      </div>
-                    </div>
-                  )}
                 </motion.div>
               )}
             </AnimatePresence>

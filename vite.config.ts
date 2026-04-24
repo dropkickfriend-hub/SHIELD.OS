@@ -9,7 +9,7 @@ export default defineConfig(({mode}) => {
     base: './', // Ensures assets load correctly on GitHub Pages
     plugins: [react(), tailwindcss()],
     define: {
-      'process.env.GEMINI_API_KEY': JSON.stringify(env.GEMINI_API_KEY),
+      'process.env.VITE_FIREBASE_CONFIG': JSON.stringify(env.VITE_FIREBASE_CONFIG),
     },
     resolve: {
       alias: {
