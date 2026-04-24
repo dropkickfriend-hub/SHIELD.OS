@@ -1,0 +1,74 @@
+name: Desktop Installers
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact_glob: 'src-tauri/target/release/bundle/{msi,nsis}/*.{msi,exe}'
+            artifact_name: shield-os-windows
+          - os: macos-14
+            target: aarch64-apple-darwin
+            artifact_glob: 'src-tauri/target/release/bundle/{dmg,macos}/*.dmg'
+            artifact_name: shield-os-macos
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact_glob: 'src-tauri/target/release/bundle/{appimage,deb}/*.{AppImage,deb}'
+            artifact_name: shield-os-linux
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install Linux build deps
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libssl-dev build-essential
+
+      - run: npm ci
+
+      - name: Generate icons from source PNG
+        run: npx tauri icon src-tauri/icons/icon.png -o src-tauri/icons
+
+      - name: Build Tauri bundles
+        run: npx tauri build --target ${{ matrix.target }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: ${{ matrix.artifact_glob }}
+          if-no-files-found: error
+
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ matrix.artifact_glob }}

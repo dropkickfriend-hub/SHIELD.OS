@@ -39,6 +39,7 @@ import {
 } from 'firebase/firestore';
 import { cn } from './lib/utils';
 import { auth, db, signIn } from './lib/firebase';
+import { capabilities, type ProcessEntry } from './capabilities';
 
 // --- Types ---
 interface LogEntry {
@@ -47,15 +48,6 @@ interface LogEntry {
   level: 'info' | 'warn' | 'error' | 'success';
   message: string;
   category: string;
-}
-
-interface ProcessInfo {
-  pid: number;
-  name: string;
-  cpu: number;
-  mem: number;
-  status: 'running' | 'sleeping' | 'suspended';
-  connections: string[];
 }
 
 interface PerfReport {
@@ -174,7 +166,7 @@ const SecurityDashboard = () => {
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [networkInfo, setNetworkInfo] = useState<any>(null);
   const [location, setLocation] = useState<any>(null);
-  const [processes, setProcesses] = useState<ProcessInfo[]>([]);
+  const [processes, setProcesses] = useState<ProcessEntry[]>([]);
   const [user, setUser] = useState<any>(null);
   const [perfReports, setPerfReports] = useState<PerfReport[]>([]);
   const [isBenchmarking, setIsBenchmarking] = useState(false);
@@ -245,28 +237,33 @@ const SecurityDashboard = () => {
     }
   };
 
-  // --- Real-time Process Simulation ---
+  // --- Process / Installed-App listing (real on native, simulated on web) ---
   useEffect(() => {
-    const mockProcesses: string[] = [
-      'kernel_task', 'launchd', 'securityd', 'WindowServer', 
-      'com.android.chrome', 'system_server', 'zygote64', 'adbd',
-      'com.droid.sentry', 'networkstack', 'dns_resolver', 'remote_trace'
-    ];
+    let cancelled = false;
+    const refresh = async () => {
+      try {
+        const procs = await capabilities.listProcesses();
+        if (!cancelled) setProcesses(procs);
+      } catch (e) {
+        if (!cancelled) addLog(`Process enumeration failed: ${String(e)}`, "error", "SYS");
+      }
+    };
+    refresh();
+    // Desktop refreshes live; Android installed-app list is static, so poll slower.
+    const intervalMs = capabilities.platform === 'android' ? 30_000 : 2_000;
+    const interval = setInterval(refresh, intervalMs);
+    return () => { cancelled = true; clearInterval(interval); };
+  }, [addLog]);
 
-    const interval = setInterval(() => {
-      const newProcs = mockProcesses.map(name => ({
-        pid: Math.floor(Math.random() * 9000) + 100,
-        name,
-        cpu: Math.random() * 5,
-        mem: Math.random() * 300,
-        status: (Math.random() > 0.8 ? 'sleeping' : 'running') as any,
-        connections: Math.random() > 0.7 ? [`${Math.floor(Math.random()*255)}.${Math.floor(Math.random()*255)}.0.1:443`] : []
-      }));
-      setProcesses(newProcs.sort((a, b) => b.cpu - a.cpu));
-    }, 2000);
-
-    return () => clearInterval(interval);
-  }, []);
+  const handleKill = useCallback(async (id: string, label: string) => {
+    if (!capabilities.supports.killProcess) {
+      addLog(`Kill unavailable in ${capabilities.platform} build.`, "warn", "SYS");
+      return;
+    }
+    addLog(`Termination requested: ${label}`, "info", "SYS");
+    const res = await capabilities.killProcess(id);
+    addLog(res.message, res.ok ? "success" : "error", "SYS");
+  }, [addLog]);
 
   // --- Firebase Subscriptions ---
   useEffect(() => {
@@ -510,39 +507,71 @@ const SecurityDashboard = () => {
                        </div>
                      </div>
 
+                     <div className="mb-4 flex items-center justify-between text-[9px] uppercase tracking-widest font-black">
+                        <span className="opacity-60">
+                          Source: <span className="text-[#00ff41]">{capabilities.platform}</span>
+                          {!capabilities.supports.realProcesses && " (simulated)"}
+                        </span>
+                        <span className="opacity-60">{processes.length} entries</span>
+                     </div>
                      <div className="space-y-2">
                         <div className="grid grid-cols-12 gap-2 text-[8px] uppercase font-black text-[#00ff41]/40 tracking-widest mb-2 border-b border-[#00ff41]/10 pb-2">
-                           <div className="col-span-1 text-center">PID</div>
-                           <div className="col-span-5">PROCESS_NAME</div>
+                           <div className="col-span-1 text-center">ID</div>
+                           <div className="col-span-5">NAME</div>
                            <div className="col-span-2 text-center">CPU</div>
                            <div className="col-span-2 text-center">MEM</div>
-                           <div className="col-span-2 text-right">CONNS</div>
+                           <div className="col-span-2 text-right">ACTION</div>
                         </div>
-                        {processes.map((proc) => (
-                           <motion.div 
+                        {processes.slice(0, 80).map((proc) => {
+                          const display = proc.label ?? proc.name;
+                          return (
+                           <motion.div
                             layout
-                            key={proc.name}
+                            key={proc.id}
                             className={cn(
                               "grid grid-cols-12 gap-2 p-2 hover:bg-[#00ff41]/5 border border-transparent hover:border-[#00ff41]/20 group transition-all items-center",
-                              proc.name.includes('sentry') && "bg-[#00ff41]/10 border-[#00ff41]/30"
+                              proc.flagged && "bg-[#ff4100]/10 border-[#ff4100]/40 hover:border-[#ff4100]"
                             )}
+                            title={proc.flagReason ?? ''}
                            >
-                             <div className="col-span-1 text-[9px] text-center opacity-40 font-bold">{proc.pid}</div>
+                             <div className="col-span-1 text-[9px] text-center opacity-40 font-bold truncate">{proc.id}</div>
                              <div className="col-span-5 text-[10px] font-black truncate flex items-center gap-2">
-                               <div className={cn("w-1.5 h-1.5 rounded-sm", proc.status === 'running' ? "bg-[#00ff41] shadow-[0_0_5px_#00ff41]" : "bg-white/10")} />
-                               {proc.name}
+                               <div className={cn(
+                                 "w-1.5 h-1.5 rounded-sm shrink-0",
+                                 proc.flagged ? "bg-[#ff4100] shadow-[0_0_5px_#ff4100]"
+                                   : proc.status === 'running' ? "bg-[#00ff41] shadow-[0_0_5px_#00ff41]"
+                                   : "bg-white/10"
+                               )} />
+                               {display}
                              </div>
-                             <div className="col-span-2 text-[10px] font-bold text-center">{proc.cpu.toFixed(1)}%</div>
-                             <div className="col-span-2 text-[10px] font-bold text-center">{proc.mem.toFixed(0)} MB</div>
-                             <div className="col-span-2 text-[9px] text-right text-amber-500 font-black font-mono">
-                               {proc.connections.length > 0 ? (
-                                 <span className="flex items-center justify-end gap-1">
-                                    <Globe size={10} /> {proc.connections.length}
+                             <div className="col-span-2 text-[10px] font-bold text-center">
+                               {proc.cpu != null ? `${proc.cpu.toFixed(1)}%` : '—'}
+                             </div>
+                             <div className="col-span-2 text-[10px] font-bold text-center">
+                               {proc.mem != null ? `${proc.mem.toFixed(0)} MB` : '—'}
+                             </div>
+                             <div className="col-span-2 text-right">
+                               {capabilities.supports.killProcess ? (
+                                 <button
+                                   onClick={() => handleKill(proc.id, display)}
+                                   className={cn(
+                                     "text-[9px] font-black uppercase tracking-widest px-2 py-1 border transition-colors",
+                                     proc.flagged
+                                       ? "border-[#ff4100] text-[#ff4100] hover:bg-[#ff4100] hover:text-black"
+                                       : "border-[#00ff41]/30 text-[#00ff41]/60 hover:border-[#ff4100] hover:text-[#ff4100]"
+                                   )}
+                                 >
+                                   {capabilities.platform === 'android' ? 'Uninstall' : 'Kill'}
+                                 </button>
+                               ) : proc.connections.length > 0 ? (
+                                 <span className="flex items-center justify-end gap-1 text-[9px] text-amber-500 font-black font-mono">
+                                   <Globe size={10} /> {proc.connections.length}
                                  </span>
-                               ) : "—"}
+                               ) : <span className="text-[9px] opacity-30">—</span>}
                              </div>
                            </motion.div>
-                        ))}
+                          );
+                        })}
                      </div>
                   </div>
                 </motion.div>

@@ -6,3 +6,16 @@ coverage/
 *.log
 .env*
 !.env.example
+
+# Tauri
+src-tauri/target/
+src-tauri/gen/
+src-tauri/Cargo.lock
+src-tauri/icons/icon.ico
+src-tauri/icons/icon.icns
+src-tauri/icons/*.png
+!src-tauri/icons/icon.png
+
+# Capacitor generates android/ from capacitor.config.ts + scripts/setup-android.sh
+android/
+
